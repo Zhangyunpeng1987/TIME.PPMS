@@ -21,7 +21,7 @@ microenvironment (TIME) cellular programs (NMF1-4) between paired tumor-normal s
 -   TF activity (decoupleR)
 -   Cell-cell communication (CellChat)
 -   KEGG metabolic activity analysis (AddModuleScore)
--   TCGA pan-cancer datasets analysis (TCGAplot)
+-   TCGA pan-cancer analysis (TCGAplot)
 -   Prognostic model construction (Mime1)
 -   Immune infiltration analysis 
 -   Drug sensitivity prediction (oncoPredict)
