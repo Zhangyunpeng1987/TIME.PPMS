@@ -1,0 +1,46 @@
+R version 4.4.1
+Platform: x86_64-conda-linux-gnu (64-bit)
+Running under: Linux (server environment, RStudio Server)
+
+Matrix products: default
+
+attached base packages:
+stats graphics grDevices utils datasets methods base
+
+other attached packages:
+Seurat
+harmony
+SingleR
+clustree
+pheatmap
+psych
+clusterProfiler
+org.Hs.eg.db
+GSVA
+survival
+survminer
+glmnet
+ggplot2
+dplyr
+tidyr
+CellChat
+decoupleR
+circlize
+infercnv
+copykat
+scMetabolism
+oncoPredict
+
+loaded via a namespace (and not attached):
+Rcpp
+Matrix
+data.table
+stringr
+magrittr
+future
+parallel
+BiocGenerics
+Biobase
+AnnotationDbi
+IRanges
+S4Vectors
