@@ -158,81 +158,340 @@ dev.off()
 
 
 ## 3. Figure2C. NMF marker genes between PT and NT ----
-library(scRNAtoolVis)
-marker_condition$gene <- rownames(marker_condition)
-gene_info <- ensembl_getBM(marker_condition$gene)
-marker_condition <- marker_condition[marker_condition$X %in% gene_info$external_gene_name, ]
-pdf("Figure2C_jjVolcano.pdf", width = 8, height = 6)
-jjVolcano(diffData = marker_condition,
-          topGeneN = 5,
-          aesCol = c("#3361A5", "#A31D1D"),
-          tile.col = nmf_colors,
-          legend.position = c(0.9, 0.9))
-dev.off()
+# 1.4 paired pseudobulk DESeq2：PT vs NT ----
+suppressPackageStartupMessages({
+  library(DESeq2)
+  library(Matrix)
+  library(dplyr)
+  library(tibble)
+  library(readr)
+  library(BiocParallel)
+})
+register(MulticoreParam(workers = 20))
 
+run_deseq2_one_nmf <- function(pb_item, nmf_i,
+                               min_count = 10,
+                               min_pb_samples = 2,
+                               lfc_cutoff = 0.25) {
+  
+  message("Running paired pseudobulk DESeq2 for ", nmf_i, " ...")
+  pb_counts <- pb_item$counts
+  coldata <- as.data.frame(pb_item$coldata)
+  
+  coldata <- coldata[match(colnames(pb_counts), coldata$pb_id), , drop = FALSE]
+  if (any(is.na(coldata$pb_id))) {
+    stop(nmf_i, ": coldata matching failed. Some pb_id values are NA.")
+  }
+  rownames(coldata) <- coldata$pb_id
+  stopifnot(identical(colnames(pb_counts), rownames(coldata)))
+  
+  coldata$patient_pb <- factor(coldata$patient_pb)
+  coldata$group_raw <- factor(coldata$group_raw, levels = c("NT", "PT"))
+  
+  message(
+    nmf_i, ": ",
+    ncol(pb_counts), " pseudobulk samples; ",
+    dplyr::n_distinct(coldata$patient_pb), " paired patients before gene filtering."
+  )
+  
+  keep_gene <- Matrix::rowSums(pb_counts >= min_count) >= min_pb_samples &
+    Matrix::rowSums(pb_counts) > 0
+  
+  pb_counts_use <- pb_counts[keep_gene, , drop = FALSE]
+  
+  message(
+    nmf_i, ": ",
+    nrow(pb_counts_use), " genes retained; ",
+    ncol(pb_counts_use), " pseudobulk samples; ",
+    dplyr::n_distinct(coldata$patient_pb), " paired patients."
+  )
+  
+  dds <- DESeqDataSetFromMatrix(
+    countData = round(as.matrix(pb_counts_use)),
+    colData = coldata,
+    design = ~ patient_pb + group_raw
+  )
+  
+  dds <- DESeq(dds, quiet = FALSE, parallel = TRUE)
+  
+  res <- results(
+    dds,
+    contrast = c("group_raw", "PT", "NT"),
+    alpha = 0.05,
+    parallel = TRUE
+  )
+  
+  res_df <- as.data.frame(res) %>%
+    tibble::rownames_to_column("gene") %>%
+    dplyr::mutate(
+      NMF_program = nmf_i,
+      avg_log2FC = log2FoldChange,
+      p_val = pvalue,
+      p_val_adj = padj,
+      condition = dplyr::case_when(
+        !is.na(p_val_adj) & p_val_adj < 0.05 & avg_log2FC > 0 ~ "PT",
+        !is.na(p_val_adj) & p_val_adj < 0.05 & avg_log2FC < 0 ~ "NT",
+        TRUE ~ "NS"
+      ),
+      direction = dplyr::case_when(
+        condition == "PT" ~ "PT-up",
+        condition == "NT" ~ "NT-up",
+        TRUE ~ "NS"
+      ),
+      significant_FDR_0.05 = !is.na(p_val_adj) & p_val_adj < 0.05,
+      significant_FDR_0.05_logFC_0.25 =
+        !is.na(p_val_adj) & p_val_adj < 0.05 & abs(avg_log2FC) > lfc_cutoff,
+      n_paired_patients = dplyr::n_distinct(coldata$patient_pb),
+      n_pseudobulk_samples = nrow(coldata),
+      method = "patient-level pseudobulk paired DESeq2; design = ~ patient_pb + group_raw; contrast = PT vs NT"
+    ) %>%
+    dplyr::arrange(p_val_adj, dplyr::desc(abs(avg_log2FC)))
+  
+  summary_df <- tibble::tibble(
+    NMF_program = nmf_i,
+    n_paired_patients = dplyr::n_distinct(coldata$patient_pb),
+    n_pseudobulk_samples = nrow(coldata),
+    n_tested_genes = nrow(res_df),
+    n_sig_FDR_0.05 = sum(res_df$significant_FDR_0.05, na.rm = TRUE),
+    n_sig_FDR_0.05_logFC_0.25 = sum(res_df$significant_FDR_0.05_logFC_0.25, na.rm = TRUE),
+    n_PT_up_FDR_0.05_logFC_0.25 = sum(
+      res_df$p_val_adj < 0.05 & res_df$avg_log2FC > lfc_cutoff,
+      na.rm = TRUE
+    ),
+    n_NT_up_FDR_0.05_logFC_0.25 = sum(
+      res_df$p_val_adj < 0.05 & res_df$avg_log2FC < -lfc_cutoff,
+      na.rm = TRUE
+    )
+  )
+  
+  list(
+    res = res_df,
+    summary = summary_df,
+    dds = dds
+  )
+}
+
+nmf_vec <- c("NMF1", "NMF2", "NMF3", "NMF4")
+for (nmf_i in nmf_vec) {
+  test_i <- run_deseq2_one_nmf(
+    pb_count_list[[nmf_i]],
+    nmf_i
+  )
+  result_i <- test_i$res
+  write.csv(
+    result_i,
+    file = paste0(
+      "/data3/home/yang/GI/test/SecondV/",
+      tolower(nmf_i),
+      "_pseudobulk_DEGs.csv"
+    ),
+    row.names = FALSE
+  )
+  save(
+    test_i,
+    file = paste0(
+      "/data3/home/yang/GI/test/SecondV/",
+      tolower(nmf_i),
+      "_pseudobulk_DEGs.RData"
+    )
+  )
+  message(nmf_i, " finished and saved.")
+}
+
+# plot
+library(tidyverse)
+library(ggrepel)
+library(HGNChelper)
+
+path <- "/data3/home/yang/GI/test/SecondV"
+
+dt <- list.files(path, pattern = "nmf[1-4]_pseudobulk_DEGs\\.csv$", full.names = TRUE) %>%
+  map_dfr(read.csv) %>%
+  filter(padj < 0.05, abs(log2FoldChange) > 0.5) %>%
+  mutate(
+    NMF_program = factor(NMF_program, levels = paste0("NMF", 1:4)),
+    change = ifelse(log2FoldChange > 0, "sigUp", "sigDown")
+  )
+
+dt <- dt %>%
+  filter(!grepl("^Tissue:", gene))
+
+table(dt$NMF_program, dt$direction)
+
+set.seed(123)
+
+dt <- dt %>%
+  mutate(
+    x = as.numeric(NMF_program),
+    x_jitter = x + runif(n(), -0.28, 0.28)
+  )
+
+hgnc <- checkGeneSymbols(unique(dt$gene))
+approved_genes <- hgnc$x[hgnc$Approved]
+lab <- dt %>%
+  filter(gene %in% approved_genes) %>%
+  group_by(NMF_program, change) %>%
+  slice_max(abs(log2FoldChange), n = 5, with_ties = FALSE) %>%
+  ungroup()
+
+p <- ggplot(dt, aes(x_jitter, log2FoldChange, color = change)) +
+  geom_point(size = 1.3, alpha = 1) +
+  geom_hline(yintercept = 0, linewidth = 0.4) +
+  geom_text_repel(
+    data = lab,
+    aes(x = x_jitter, y = log2FoldChange, label = gene),
+    size = 3, color = "black",
+    box.padding = 0.3,
+    point.padding = 0.15,
+    min.segment.length = 0,
+    max.overlaps = Inf,
+    seed = 123
+  ) +
+  scale_x_continuous(
+    breaks = 1:4,
+    labels = paste0("NMF", 1:4)
+  ) +
+  scale_color_manual(values = c(sigUp = "#e6846d", sigDown = "#8dcdd5")) +
+  labs(x = NULL, y = "log2 fold change (PT vs. NT)", color = "PT vs. NT") +
+  theme_classic() +
+  theme(
+    axis.text.x = element_text(face = "bold"),
+    legend.position = "right"
+  )
+p
+ggsave(file.path(path, "Fig2C_pseudobulk_DEGs.pdf"), p, width = 8, height = 5)
 
 ## 4. Figure2D. KEGG pathway analysis of NMF marker genes ----
-library(org.Hs.eg.db)
+library(tidyverse)
 library(clusterProfiler)
-library(ggplot2)
-library(dplyr)
-# funcion for enrichment analysision
-enrichment_analysis <- function(marker_condition, cluster_name, pvalueCutoff = 0.05, logfc.threshold = 1, top_n = 10) {
-  sce.sub.markers <- marker_condition %>% 
-    filter(cluster == cluster_name) %>% 
-    filter(p_val_adj < pvalueCutoff & abs(avg_log2FC) > logfc.threshold)
-  sce.sub.markers$name <- rownames(sce.sub.markers)
-  sce.sub.markers$g <- ifelse(sce.sub.markers$avg_log2FC > logfc.threshold, "up", "down")
-  ids <- bitr(sce.sub.markers$name, fromType = "SYMBOL", toType = "ENTREZID", OrgDb = "org.Hs.eg.db")
-  data <- merge(sce.sub.markers, ids, by.x = "name", by.y = "SYMBOL")
-  gcSample <- split(data$ENTREZID, data$g)
-  xx_go <- compareCluster(gcSample, fun = "enrichGO", OrgDb = "org.Hs.eg.db", ont = "BP", pvalueCutoff = 1, qvalueCutoff = 1)
-  res <- xx_go@compareClusterResult
-  Symbol <- mapIds(get("org.Hs.eg.db"), keys = sce.sub.markers$name, keytype = "SYMBOL", column = "ENTREZID")
-  for (i in 1:dim(res)[1]) {
-    arr <- unlist(strsplit(as.character(res[i, "geneID"]), split = "/"))
-    gene_names <- paste(unique(names(Symbol[Symbol %in% arr])), collapse = "/")
-    res[i, "geneID"] <- gene_names
-  }
-  enrich <- res %>% 
-    group_by(Cluster) %>% 
-    top_n(n = top_n, wt = -pvalue)
-  dt <- enrich
-  dt <- dt[order(dt$Cluster, decreasing = TRUE), ]
-  dt$Description <- factor(dt$Description, levels = rev(unique(dt$Description)))
-  dt$Cluster <- factor(dt$Cluster, levels = c("up", "down"))
-  dt$lable <- ifelse(dt$Cluster == "up", 1, -1)
-  dt$pvalue_loc <- -log10(dt$pvalue) * dt$lable
-  dt$lable_hjust <- ifelse(dt$Cluster == "up", 1, 0)
-  dt$lable_xloc <- ifelse(dt$Cluster == "up", -0.5, 0.5)
-  dt$label_color <- "black"
-  dt$label_color[1:3] <- "red"
-  color <- c(up = "#e15759", down = "#586ea6")
-  p <- ggplot(dt, aes(x = pvalue_loc, y = Description, fill = Cluster)) + 
-    geom_bar(stat = "identity", color = "black", width = 0.6) +
-    scale_fill_manual(values = color) +
-    scale_x_continuous(limits = c(-34, 34)) +
-    geom_text(aes(x = lable_xloc, y = Description, label = Description, hjust = lable_hjust), 
-              color = dt$label_color, size = 4.5) +
-    labs(x = "Log10(pvalue)", y = NULL, title = "") +
-    annotate("text", x = 25, y = 15, label = "Up", size = 6, fontface = "bold", color = "black") +
-    annotate("text", x = -25, y = 5, label = "Down", size = 6, fontface = "bold", color = "black") +
+library(org.Hs.eg.db)
+library(patchwork)
+
+path <- "/data3/home/yang/GI/test/SecondV"
+
+dt <- list.files(path, pattern = "nmf[1-4]_pseudobulk_DEGs\\.csv$", full.names = TRUE) %>%
+  map_dfr(read.csv) %>%
+  filter(!grepl("^Tissue:", gene))
+
+enrich_nmf <- function(dat, nmf, logfc.cut = 0.5, top_n = 5) {
+  
+  x <- dat %>% filter(NMF_program == nmf)
+  bg <- bitr(unique(x$gene), "SYMBOL", "ENTREZID", OrgDb = org.Hs.eg.db)$ENTREZID
+  
+  sig <- x %>%
+    filter(padj < 0.05, abs(log2FoldChange) > logfc.cut) %>%
+    mutate(Group = ifelse(log2FoldChange > 0, "PT", "NT"))
+  
+  res <- map_dfr(c("PT", "NT"), function(g) {
+    genes <- sig %>% filter(Group == g) %>% pull(gene)
+    ids <- bitr(genes, "SYMBOL", "ENTREZID", OrgDb = org.Hs.eg.db)$ENTREZID
+    
+    enrichGO(
+      gene = ids, universe = bg, OrgDb = org.Hs.eg.db,
+      keyType = "ENTREZID", ont = "BP",
+      pAdjustMethod = "BH", pvalueCutoff = 1, qvalueCutoff = 1,
+      readable = TRUE
+    )@result %>%
+      filter(p.adjust < 0.05) %>%
+      arrange(p.adjust) %>%
+      # slice_head(n = top_n) %>%
+      mutate(Group = g)
+  })
+  
+  res <- res %>%
+    mutate(
+      score = -log10(p.adjust) * ifelse(Group == "PT", 1, -1),
+      term = paste0(Description, "_", Group),
+      Group = factor(Group, levels = c("NT", "PT"))
+    ) %>%
+    arrange(Group, score) %>%
+    mutate(term = factor(term, levels = unique(term)))
+  
+  p <- ggplot(res, aes(score, term, fill = Group)) +
+    geom_col(width = 0.65, color = "black", linewidth = 0.25) +
+    geom_vline(xintercept = 0, linewidth = 0.4) +
+    scale_y_discrete(labels = setNames(res$Description, res$term)) +
+    scale_fill_manual(values = c(NT = "#8dcdd5", PT = "#e6846d")) +
+    labs(
+      title = nmf,
+      x = "Signed -log10(FDR)",
+      y = NULL,
+      fill = "PT vs. NT"
+    ) +
     theme_classic() +
-    theme(axis.text.x = element_text(size = 15),
-          axis.title.x = element_text(size = 15),
-          axis.text.y = element_blank(),
-          axis.line.y = element_blank(),
-          axis.ticks.y = element_blank(),
-          legend.position = 'none')
-  return(list(
-    markers = sce.sub.markers,
-    enrichment_results = res,
-    plot = p
-  ))
+    theme(
+      plot.title = element_text(face = "bold", hjust = 0.5),
+      axis.text.y = element_text(size = 9),
+      legend.position = "top"
+    )
+  
+  list(enrichment = res, plot = p)
 }
-result <- enrichment_analysis(marker_condition, "NMF4")
-print(result$plot)
-ggsave(filename = "Figure2D_nmf4.pdf", width = 8, height = 6, plot = result$plot)
+
+res_NMF1 <- enrich_nmf(dt, "NMF1")
+res_NMF2 <- enrich_nmf(dt, "NMF2")
+res_NMF3 <- enrich_nmf(dt, "NMF3")
+res_NMF4 <- enrich_nmf(dt, "NMF4")
+
+nmf <- res_NMF4$enrichment
+write.csv(nmf, file = "NMF4_GO.csv")
+
+# p_all <- (res_NMF1$plot | res_NMF2$plot) /
+#   (res_NMF3$plot | res_NMF4$plot)
+# 
+# p_all
+# 
+# ggsave(
+#   file.path(path, "Fig2D_pseudobulk_GO.pdf"),
+#   p_all, width = 14, height = 10
+# )
+
+dt <- res_NMF3$enrichment 
+dt <- dt %>%
+  mutate(
+    Cluster = factor(as.character(Group), levels = c("NT", "PT")),
+    Description = str_wrap(Description, width = 35)
+  ) %>%
+  arrange(Cluster, p.adjust)
+
+dt$term <- factor(dt$term, levels = rev(dt$term))
+
+dt$lable <- ifelse(dt$Cluster == "PT", 1, -1)
+dt$pvalue_loc <- -log10(dt$p.adjust) * dt$lable
+dt$lable_hjust <- ifelse(dt$Cluster == "PT", 1, 0)
+dt$lable_xloc <- ifelse(dt$Cluster == "PT", -0.5, 0.5)
+
+dt$label_color <- "black"
+dt$label_color[dt$Cluster == "PT"][1:min(3, sum(dt$Cluster == "PT"))] <- "red"
+dt$label_color[dt$Cluster == "NT"][1:min(3, sum(dt$Cluster == "NT"))] <- "red"
+
+color <- c(NT = "#8dcdd5", PT = "#e6846d")
+xmax <- ceiling(max(abs(dt$pvalue_loc))) + 1
+
+p <- ggplot(dt, aes(x = pvalue_loc, y = term, fill = Cluster)) +
+  geom_bar(stat = "identity", color = "black", width = 0.6) +
+  scale_fill_manual(values = color) +
+  scale_x_continuous(limits = c(-xmax, xmax)) +
+  scale_y_discrete(labels = setNames(dt$Description, dt$term)) +
+  geom_text(
+    aes(x = lable_xloc, y = term, label = Description, hjust = lable_hjust),
+    color = dt$label_color, size = 4.5, lineheight = 0.9
+  ) +
+  labs(x = expression(-log[10]~"(FDR)"), y = NULL, title = "") +
+  # annotate("text", x = xmax * 0.75, y = length(levels(dt$term)) - 1, label = "PT", size = 6, fontface = "bold") +
+  # annotate("text", x = -xmax * 0.75, y = 2, label = "NT", size = 6, fontface = "bold") +
+  theme_classic() +
+  theme(
+    axis.text.x = element_text(size = 15),
+    axis.title.x = element_text(size = 15),
+    axis.text.y = element_blank(),
+    axis.line.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    legend.position = "none"
+  )
+
+p
+ggsave("NMF4_GO.pdf", plot = p, width = 4.5, height = 4.5)
 
 
 ## 5. Figure2E. NMF survial analysis ----
