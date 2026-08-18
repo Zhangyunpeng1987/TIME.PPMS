@@ -1026,16 +1026,13 @@ dev.off()
 
 
 ## 9. Figure S8F. Additional validation ----
-library(tidyverse)
-library(survival)
-library(survminer)
-library(timeROC)
-library(ggplot2)
-
-load("Figure6_all_mime1.RData")
+load("/data3/home/yang/GI/test/Figure6_all_mime1.RData")
 fit_rsf <- res$ml.res$RSF
 out_prefix <- "External_GEO_RSF_validation"
 
+library(randomForestSRC)
+
+# 1. 
 sig_genes <- fit_rsf$xvar.names
 if (is.null(sig_genes)) {
   sig_genes <- names(fit_rsf$importance)
@@ -1045,59 +1042,216 @@ sig_genes <- gsub("_", ".", sig_genes)
 sig_genes <- make.names(sig_genes)
 length(sig_genes)
 
-# data processing
-external_dat <- dt %>%
+# 2. 
+tcga_train <- list_train_vali_Data$Dataset1 %>%
   as.data.frame()
+
+colnames(tcga_train) <- gsub("-", ".", colnames(tcga_train))
+colnames(tcga_train) <- gsub("_", ".", colnames(tcga_train))
+colnames(tcga_train) <- make.names(colnames(tcga_train))
+missing_tcga <- setdiff(sig_genes, colnames(tcga_train))
+
+length(missing_tcga)
+missing_tcga
+
+# 3. 
+tcga_train <- tcga_train %>%
+  mutate(
+    OS.time = as.numeric(OS.time),
+    OS = as.numeric(OS)
+  ) %>%
+  filter(
+    !is.na(OS.time),
+    !is.na(OS),
+    OS.time > 0
+  )
+
+tcga_train[, sig_genes] <- lapply(
+  tcga_train[, sig_genes, drop = FALSE],
+  as.numeric
+)
+
+# 4. Z-score
+zscore_fun <- function(x) {
+  
+  mu <- mean(x, na.rm = TRUE)
+  x[is.na(x)] <- mu
+  
+  sigma <- sd(x, na.rm = TRUE)
+  
+  if (!is.finite(sigma) || sigma == 0) {
+    return(rep(0, length(x)))
+  }
+  
+  (x - mu) / sigma
+}
+
+tcga_train_z <- tcga_train
+
+tcga_train_z[, sig_genes] <- lapply(
+  tcga_train_z[, sig_genes, drop = FALSE],
+  zscore_fun
+)
+
+# 5. 
+train_fit <- tcga_train_z %>%
+  select(
+    OS.time,
+    OS,
+    all_of(sig_genes)
+  )
+
+set.seed(5201314)
+
+fit_rsf_z <- rfsrc(
+  Surv(OS.time, OS) ~ .,
+  data = train_fit,
+  ntree = 1000,
+  nodesize = 5,
+  mtry = 18,
+  splitrule = "logrank",
+  nsplit = 10,
+  importance = TRUE,
+  proximity = FALSE,
+  forest = TRUE,
+  seed = 5201314
+)
+
+fit_rsf_z
+
+save(
+  fit_rsf_z,
+  sig_genes,
+  file = "PPMS_RSF_Zscore.RData"
+)
+
+length(sig_genes)
+length(missing_tcga)
+fit_rsf_z
+
+##
+load("/data3/home/yang/GI/test/SecondV/PPMS_RSF_Zscore.RData")
+load("/data3/home/yang/GI/test/FirstV/Survival_data/PDAC_survival.RData")
+load("/data3/home/yang/GI/test/FirstV/LUAD_survival.RData")
+dt <- LUAD_survival
+external_dat <- as.data.frame(dt)
 external_dat$ID <- rownames(external_dat)
+
 colnames(external_dat) <- gsub("-", ".", colnames(external_dat))
 colnames(external_dat) <- gsub("_", ".", colnames(external_dat))
 colnames(external_dat) <- make.names(colnames(external_dat))
+
 external_dat <- external_dat %>%
   mutate(
     ID = as.character(ID),
     OS.time = as.numeric(OS.time),
     OS = as.numeric(OS)
   ) %>%
-  filter(!is.na(OS.time), !is.na(OS), OS.time > 0)
-available_genes <- intersect(sig_genes, colnames(external_dat))
-missing_genes <- setdiff(sig_genes, colnames(external_dat))
+  filter(
+    !is.na(OS.time),
+    !is.na(OS),
+    OS.time > 0
+  )
 
-cat("Available PPMS genes:", length(available_genes), "/", length(sig_genes), "\n")
-cat("Missing PPMS genes:", length(missing_genes), "\n")
-cat("Gene coverage:", round(length(available_genes) / length(sig_genes) * 100, 2), "%\n")
+sig_genes <- fit_rsf_z$xvar.names
 
-external_dat[, available_genes] <- apply(
+length(sig_genes)
+
+available_genes <- intersect(
+  sig_genes,
+  colnames(external_dat)
+)
+
+missing_genes <- setdiff(
+  sig_genes,
+  colnames(external_dat)
+)
+
+cat("Available PPMS genes:",
+    length(available_genes), "/", length(sig_genes), "\n")
+
+cat("Missing PPMS genes:",
+    length(missing_genes), "\n")
+
+cat("Gene coverage:",
+    round(length(available_genes) / length(sig_genes) * 100, 2),
+    "%\n")
+
+external_dat[, available_genes] <- lapply(
   external_dat[, available_genes, drop = FALSE],
-  2,
   as.numeric
-) %>% as.data.frame()
+)
+
+zscore_external <- function(x) {
+  
+  mu <- mean(x, na.rm = TRUE)
+  
+  if (!is.finite(mu)) {
+    return(rep(0, length(x)))
+  }
+  
+  x[is.na(x)] <- mu
+  
+  sigma <- sd(x, na.rm = TRUE)
+  
+  if (!is.finite(sigma) || sigma == 0) {
+    return(rep(0, length(x)))
+  }
+  
+  (x - mu) / sigma
+}
+
+external_dat[, available_genes] <- lapply(
+  external_dat[, available_genes, drop = FALSE],
+  zscore_external
+)
 
 if (length(missing_genes) > 0) {
-  for (g in missing_genes) {
-    external_dat[[g]] <- 0
-  }
+  external_dat[, missing_genes] <- 0
 }
 
-for (g in available_genes) {
-  external_dat[[g]][is.na(external_dat[[g]])] <- mean(external_dat[[g]], na.rm = TRUE)
-}
+external_x <- external_dat[
+  ,
+  sig_genes,
+  drop = FALSE
+]
 
-external_x <- external_dat[, sig_genes, drop = FALSE]
+dim(external_x)
 
-# prediction
+stopifnot(
+  identical(
+    colnames(external_x),
+    fit_rsf_z$xvar.names
+  )
+)
+
+stopifnot(!anyNA(external_x))
+
 pred <- predict(
-  fit_rsf,
+  fit_rsf_z,
   newdata = external_x
 )
-external_dat$RS <- as.numeric(pred$predicted)
-risk_score_df <- external_dat %>%
-  select(ID, OS.time, OS, RS)
 
-# Cox + C-index
-cox_fit <- coxph(Surv(OS.time, OS) ~ RS, data = external_dat)
+external_dat$RS <- as.numeric(pred$predicted)
+
+summary(external_dat$RS)
+
+length(available_genes)
+length(missing_genes)
+dim(external_x)
+summary(external_dat$RS)
+
+library(survival)
+
+cox_fit <- coxph(
+  Surv(OS.time, OS) ~ RS,
+  data = external_dat
+)
+
 cox_sum <- summary(cox_fit)
+
 cox_result <- data.frame(
-  Cohort = out_prefix,
+  Cohort = "CRC_GSE161158",
   n_sample = nrow(external_dat),
   n_event = sum(external_dat$OS == 1, na.rm = TRUE),
   n_PPMS_genes = length(sig_genes),
@@ -1110,103 +1264,77 @@ cox_result <- data.frame(
   C_index = as.numeric(cox_sum$concordance[1]),
   C_index_se = as.numeric(cox_sum$concordance[2])
 )
+
 cox_result
 
-# KM
-external_dat <- external_dat %>%
-  mutate(
-    RiskGroup = ifelse(RS >= median(RS, na.rm = TRUE), "High", "Low"),
-    RiskGroup = factor(RiskGroup, levels = c("Low", "High"))
-  )
-fit_km <- survfit(Surv(OS.time, OS) ~ RiskGroup, data = external_dat)
-p_km <- ggsurvplot(
-  fit_km,
-  data = external_dat,
-  pval = TRUE,
-  risk.table = TRUE,
-  conf.int = FALSE,
-  legend.title = NULL,
-  legend.labs = c("Low PPMS", "High PPMS"),
-  palette = c("#868686", "#B24745"),
-  xlab = "Time (days)",
-  ylab = "Overall survival probability"
-)
-p_km
-pdf(paste0(out_prefix, "_KM_curve.pdf"), width = 6, height = 6)
-print(p_km)
-dev.off()
+library(timeROC)
+library(dplyr)
+library(ggplot2)
 
-# Time-dependent ROC
+# 1/3/5 years
 time_points <- c(365, 1095, 1825)
 time_labels <- c("1-year", "3-year", "5-year")
-roc_obj <- tryCatch({
-  timeROC(
-    T = external_dat$OS.time,
-    delta = external_dat$OS,
-    marker = external_dat$RS,
-    cause = 1,
-    weighting = "marginal",
-    times = time_points,
-    iid = TRUE
-  )
-}, error = function(e) NULL)
 
-if (!is.null(roc_obj)) {
-  auc_result <- data.frame(
-    Cohort = out_prefix,
-    Time = time_labels,
-    Time_days = time_points,
-    AUC = as.numeric(roc_obj$AUC)
+roc_obj <- timeROC(
+  T = external_dat$OS.time,
+  delta = external_dat$OS,
+  marker = external_dat$RS,
+  cause = 1,
+  weighting = "marginal",
+  times = time_points,
+  iid = TRUE
+)
+
+# AUC
+auc_result <- data.frame(
+  Cohort = "CRC_GSE161158",
+  Time = time_labels,
+  Time_days = time_points,
+  AUC = as.numeric(roc_obj$AUC)
+)
+
+auc_result
+
+roc_df <- bind_rows(
+  data.frame(
+    FPR = roc_obj$FP[, 1],
+    TPR = roc_obj$TP[, 1],
+    Time = paste0("1-year AUC = ", round(roc_obj$AUC[1], 3))
+  ),
+  data.frame(
+    FPR = roc_obj$FP[, 2],
+    TPR = roc_obj$TP[, 2],
+    Time = paste0("3-year AUC = ", round(roc_obj$AUC[2], 3))
+  ),
+  data.frame(
+    FPR = roc_obj$FP[, 3],
+    TPR = roc_obj$TP[, 3],
+    Time = paste0("5-year AUC = ", round(roc_obj$AUC[3], 3))
   )
-  write.csv(
-    auc_result,
-    paste0(out_prefix, "_timeROC_AUC.csv"),
-    row.names = FALSE
+)
+
+p_roc <- ggplot(
+  roc_df,
+  aes(x = FPR, y = TPR, color = Time)
+) +
+  geom_line(linewidth = 1) +
+  geom_abline(
+    slope = 1,
+    intercept = 0,
+    linetype = 2,
+    color = "grey50"
+  ) +
+  theme_bw() +
+  theme(
+    panel.grid = element_blank()
+  ) +
+  labs(
+    title = "CRC_GSE161158",
+    x = "False positive rate",
+    y = "True positive rate",
+    color = NULL
   )
-  roc_df <- bind_rows(
-    data.frame(
-      FPR = roc_obj$FP[, 1],
-      TPR = roc_obj$TP[, 1],
-      Time = paste0("1-year AUC = ", round(roc_obj$AUC[1], 3))
-    ),
-    data.frame(
-      FPR = roc_obj$FP[, 2],
-      TPR = roc_obj$TP[, 2],
-      Time = paste0("3-year AUC = ", round(roc_obj$AUC[2], 3))
-    ),
-    data.frame(
-      FPR = roc_obj$FP[, 3],
-      TPR = roc_obj$TP[, 3],
-      Time = paste0("5-year AUC = ", round(roc_obj$AUC[3], 3))
-    )
-  )
-  p_roc <- ggplot(roc_df, aes(x = FPR, y = TPR, color = Time)) +
-    geom_line(linewidth = 1) +
-    geom_abline(slope = 1, intercept = 0, linetype = 2, color = "grey50") +
-    theme_bw() +
-    theme(panel.grid = element_blank()) +
-    labs(
-      title = "External GEO validation",
-      x = "False positive rate",
-      y = "True positive rate",
-      color = NULL
-    )
-  pdf(paste0(out_prefix, "_timeROC_curve.pdf"), width = 6.5, height = 5)
-  print(p_roc)
-  dev.off()
-} else {
-  auc_result <- data.frame(
-    Cohort = out_prefix,
-    Time = time_labels,
-    Time_days = time_points,
-    AUC = NA_real_
-  )
-  write.csv(
-    auc_result,
-    paste0(out_prefix, "_timeROC_AUC.csv"),
-    row.names = FALSE
-  )
-}
+p_roc
 
 
 ## 10. Figure S9A-B. PPMS in TCGA pan-cancer ----
